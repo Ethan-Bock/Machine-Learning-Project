@@ -12,6 +12,8 @@ import sklearn.preprocessing
 import sklearn.pipeline
 import sklearn.base
 import sklearn.metrics
+import tensorflow as tf
+import tensorflow.keras as keras
 import joblib
 
 
@@ -92,40 +94,90 @@ def get_feature_and_label_names(my_args, data):
     return features, label
 
 def make_numerical_feature_pipeline(my_args):
+    # Create a pipeline that can be used to preprocess numerical feature data
+    # options are:
+    #   - no preprocessing
+    #   - polynomial features
+    #   - scaler
+    #   - polynomial + scaler
+    #
     items = []
     
     if my_args.use_polynomial_features:
-        ##EDIT TO CHANGE POLYNOMIAL FEATURES
         items.append(("polynomial-features", sklearn.preprocessing.PolynomialFeatures(degree=my_args.use_polynomial_features)))
     if my_args.use_scaler:
         items.append(("scaler", sklearn.preprocessing.StandardScaler()))
-    items.append(("noop", PipelineNoop()))
+
+    # Empty pipelines are not allowed. If necessary, add a placeholder.
+    if len(items) == 0:
+        items.append(("noop", PipelineNoop()))
     
     numerical_pipeline = sklearn.pipeline.Pipeline(items)
     return numerical_pipeline
 
-def make_SGD_fit_pipeline(my_args):
+def make_pseudo_fit_pipeline(my_args):
+    #
+    # Create a pipeline that can be used to preprocess the feature data
+    #
     items = []
     items.append(("features", make_numerical_feature_pipeline(my_args)))
-    items.append(("model", sklearn.linear_model.SGDRegressor()))
-    return sklearn.pipeline.Pipeline(items)
+    items.append(("model", None))
+    p = sklearn.pipeline.Pipeline(items)
+    #
+    return p
+
+
+def create_model(my_args, num_inputs):
+    #
+    # Create a 1 layer, 1 neuron neural network, using the Keras API
+    # https://www.tensorflow.org/api_docs/python/tf/keras
+    #
+    model = keras.models.Sequential()
+    model.add(keras.layers.Input(shape=(num_inputs, )))
+    model.add(keras.layers.Dense(units=100))
+    model.add(keras.layers.Dense(units=100))
+    model.add(keras.layers.Dense(units=1))
+    model.compile(loss="mse", optimizer=keras.optimizers.Adam())
+    #
+    return model
 
 def do_fit(my_args):
+    #
+    # load the training data
+    #
     train_file = my_args.train_file
     if not os.path.exists(train_file):
         raise Exception("training data file: {} does not exist.".format(train_file))
 
     X, y = load_data(my_args, train_file)
+    #
+
+    #
+    # this pipeline only transforms the data, it does not fit a model to the data
+    #
+    pipeline = make_pseudo_fit_pipeline(my_args)
+    pipeline.fit(X)
+    X1 = pipeline.transform(X)
+    #
     
-    pipeline = make_SGD_fit_pipeline(my_args)
-    pipeline.fit(X, y)
-
+    #
+    # Create a neural network model, and fit it to the data
+    #
+    model = create_model(my_args, X1.shape[1])
+    early_stopping = keras.callbacks.EarlyStopping(monitor='loss', patience=5)
+    model.fit(X1, y, epochs=5000, verbose=1, callbacks=[early_stopping])
+    #chose to keep verbose to 1 to see how the data was doing as it continued
+    
+    #
+    # Save the pipeline and the model
+    #
     model_file = get_model_filename(my_args.model_file, train_file)
-
-    joblib.dump(pipeline, model_file)
+    joblib.dump((pipeline, model), model_file)
+    #
     return
 
 def get_feature_names(pipeline, X):
+    # compute feature names from the pipeline, if polynomial features are in use
     primary_feature_names = list(X.columns[:])
     if 'polynomial-features' in pipeline['features'].named_steps:
         secondary_powers = pipeline['features']['polynomial-features'].powers_
@@ -145,6 +197,7 @@ def get_feature_names(pipeline, X):
     return feature_names
 
 def get_scale_offset(pipeline, count):
+    # get coefficients of to reverse the scaler transform
     if 'scaler' in pipeline['features'].named_steps:
         scaler = pipeline['features']['scaler']
         logging.info("scaler: {}".format(scaler))
@@ -157,7 +210,27 @@ def get_scale_offset(pipeline, count):
         logging.info("scaler not in features: {}".format(pipeline['features'].named_steps))
     return theta_scale, intercept_offset
 
+def show_network(my_args):
+    #
+    # load the pipeline and model from file
+    train_file = my_args.train_file
+    if not os.path.exists(train_file):
+        raise Exception("training data file: {} does not exist.".format(train_file))
+    model_file = get_model_filename(my_args.model_file, train_file)
+    if not os.path.exists(model_file):
+        raise Exception("Model file, '{}', does not exist.".format(model_file))
+
+    (pipeline, model) = joblib.load(model_file)
+    #
+    
+    # Use the keras method to display information
+    model.summary()
+    return
+
 def show_function(my_args):
+    #
+    # load the training data, pipeline, and model
+    #
     train_file = my_args.train_file
     if not os.path.exists(train_file):
         raise Exception("training data file: {} does not exist.".format(train_file))
@@ -166,64 +239,66 @@ def show_function(my_args):
         raise Exception("Model file, '{}', does not exist.".format(model_file))
     
     X, y = load_data(my_args, train_file)
-    pipeline = joblib.load(model_file)
+    (pipeline, model) = joblib.load(model_file)
+    #
 
+    #
+    # get information to interpret the pipeline's transformation
+    #
     feature_names = get_feature_names(pipeline, X)
     scale, offset = get_scale_offset(pipeline, len(feature_names))
+    #
+    
+    # #
+    # # transform the data
+    # #
+    # features = pipeline['features']
+    # X1 = features.transform(X)
+    # #
 
-    features = pipeline['features']
-    X = features.transform(X)
-    regressor = pipeline['model']
-
+    #
+    # extract coefficients and intercepts from the network's 1 layer
+    #
+    layer = model.get_layer(index=0)
+    weights = layer.get_weights()
+    coef_ = []
+    for i in range(weights[0].shape[0]):
+        coef_.append(weights[0][i][0])
+    intercept_ = weights[1]
+    #
+    
+    #
+    # Intercept has an offset for each feature
+    #
     intercept_offset = 0.0
-    for i in range(len(regressor.coef_)):
-        intercept_offset += regressor.coef_[i] * offset[i]
+    for i in range(len(coef_)):
+        intercept_offset += coef_[i] * offset[i]
+    #
 
-    s = "{}".format(regressor.intercept_[0]-intercept_offset)
-    for i in range(1, len(regressor.coef_)):
+    #
+    # build the display string
+    #
+    s = "{}".format(intercept_[0]-intercept_offset)
+    for i in range(len(coef_)):
         if len(feature_names[i]) > 0:
-            t = "({}*{})".format(regressor.coef_[i]*scale[i], feature_names[i])
+            t = "({}*{})".format(coef_[i]*scale[i], feature_names[i])
         else:
-            t = "({})".format(regressor.coef_[i])
+            t = "({})".format(coef_[i])
         if len(s) > 0:
             s += " + "
         s += t
+    #
 
     basename = get_basename(train_file)
     print("{}: {}".format(basename, s))
+
     return
 
-
-def show_score(my_args):
-
-    train_file = my_args.train_file
-    if not os.path.exists(train_file):
-        raise Exception("training data file: {} does not exist.".format(train_file))
-    
-    test_file = get_test_filename(my_args.test_file, train_file)
-    if not os.path.exists(test_file):
-        raise Exception("testing data file, '{}', does not exist.".format(test_file))
-    
-    model_file = get_model_filename(my_args.model_file, train_file)
-    if not os.path.exists(model_file):
-        raise Exception("Model file, '{}', does not exist.".format(model_file))
-
-    X_train, y_train = load_data(my_args, train_file)
-    X_test, y_test = load_data(my_args, test_file)
-    pipeline = joblib.load(model_file)
-    regressor = pipeline['model']
-    
-    basename = get_basename(train_file)
-    score_train = regressor.score(pipeline['features'].transform(X_train), y_train)
-    if my_args.show_test:
-        score_test = regressor.score(pipeline['features'].transform(X_test), y_test)
-        print("{}: train_score: {} test_score: {}".format(basename, score_train, score_test))
-    else:
-        print("{}: train_score: {}".format(basename, score_train))
-    return
 
 def show_loss(my_args):
-
+    #
+    # load data, pipeline, and model
+    #
     train_file = my_args.train_file
     if not os.path.exists(train_file):
         raise Exception("training data file: {} does not exist.".format(train_file))
@@ -238,13 +313,28 @@ def show_loss(my_args):
 
     X_train, y_train = load_data(my_args, train_file)
     X_test, y_test = load_data(my_args, test_file)
-    pipeline = joblib.load(model_file)
+    (pipeline, model) = joblib.load(model_file)
+    #
 
-    y_train_predicted = pipeline.predict(X_train)
-    y_test_predicted = pipeline.predict(X_test)
+    #
+    # transform data
+    #
+    X_train1 = pipeline.transform(X_train)
+    X_test1 = pipeline.transform(X_test)
+    #
+
+    #
+    # Use model to make predictions
+    #
+    y_train_predicted = model.predict(X_train1)
+    y_test_predicted = model.predict(X_test1)
+    #
 
     basename = get_basename(train_file)
     
+    #
+    # compute and display loss values
+    #
     loss_train = sklearn.metrics.mean_squared_error(y_train, y_train_predicted)
     if my_args.show_test:
         loss_test = sklearn.metrics.mean_squared_error(y_test, y_test_predicted)
@@ -265,47 +355,14 @@ def show_loss(my_args):
         print("{}: R2 train_loss: {} test_loss: {}".format(basename, loss_train, loss_test))
     else:
         print("{}: R2 train_loss: {}".format(basename, loss_train))
+    #
     return
-
-def show_model(my_args):
-
-    train_file = my_args.train_file
-    if not os.path.exists(train_file):
-        raise Exception("training data file: {} does not exist.".format(train_file))
-    
-    test_file = get_test_filename(my_args.test_file, train_file)
-    if not os.path.exists(test_file):
-        raise Exception("testing data file, '{}', does not exist.".format(test_file))
-    
-    model_file = get_model_filename(my_args.model_file, train_file)
-    if not os.path.exists(model_file):
-        raise Exception("Model file, '{}', does not exist.".format(model_file))
-
-    pipeline = joblib.load(model_file)
-    regressor = pipeline['model']
-    features = pipeline['features']
-
-    print("Model Information:")
-    print("coef_: {}".format(regressor.coef_))
-    print("intercept_: {}".format(regressor.intercept_))
-    print("n_iter_: {}".format(regressor.n_iter_))
-    print("n_features_in_: {}".format(regressor.n_features_in_))
-
-
-    try:
-        scaler = features["scaler"]
-        print("scaler.mean_: {}".format(scaler.mean_))
-        print("scaler.var_: {}".format(scaler.var_))
-    except:
-        print("No scaler.")
-    return
-
 
 
 def parse_args(argv):
     parser = argparse.ArgumentParser(prog=argv[0], description='Fit Data With Linear Regression Using Pipeline')
     parser.add_argument('action', default='SGD',
-                        choices=[ "SGD", "show-function", "score", "loss", "show-model" ], 
+                        choices=[ "SGD", "show-function", "loss", "show-network" ], 
                         nargs='?', help="desired action")
     parser.add_argument('--train-file',    '-t', default="",    type=str,   help="name of file with training data")
     parser.add_argument('--test-file',     '-T', default="",    type=str,   help="name of file with test data (default is constructed from train file name)")
@@ -314,8 +371,8 @@ def parse_args(argv):
     parser.add_argument('--features',      '-f', default=None, action="extend", nargs="+", type=str,
                         help="column names for features")
     parser.add_argument('--label',         '-l', default="label",   type=str,   help="column name for label")
-    parser.add_argument('--use-polynomial-features', '-p', default=0,         type=int,   help="degree of polynomial features.  0 = don't use (default=0)")
-    parser.add_argument('--use-scaler',    '-s', default=0,         type=int,   help="0 = don't use scaler, 1 = do use scaler (default=0)")
+    parser.add_argument('--use-polynomial-features', '-p', default=2,         type=int,   help="degree of polynomial features.  0 = don't use (default=2)")
+    parser.add_argument('--use-scaler',    '-s', default=1,         type=int,   help="0 = don't use scaler, 1 = do use scaler (default=1)")
     parser.add_argument('--show-test',     '-S', default=0,         type=int,   help="0 = don't show test loss, 1 = do show test loss (default=0)")
 
     my_args = parser.parse_args(argv[1:])
@@ -335,12 +392,10 @@ def main(argv):
         do_fit(my_args)
     elif my_args.action == "show-function":
         show_function(my_args)
-    elif my_args.action == "score":
-        show_score(my_args)
     elif my_args.action == "loss":
         show_loss(my_args)
-    elif my_args.action == "show-model":
-        show_model(my_args)
+    elif my_args.action == "show-network":
+        show_network(my_args)
     else:
         raise Exception("Action: {} is not known.".format(my_args.action))
         
@@ -348,3 +403,4 @@ def main(argv):
 
 if __name__ == "__main__":
     main(sys.argv)
+    
