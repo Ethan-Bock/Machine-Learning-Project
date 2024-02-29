@@ -498,6 +498,20 @@ def do_cross_validation(my_args):
 
     return
 
+def do_cross_validation_SVC(my_args):
+    train_file = my_args.train_file
+    if not os.path.exists(train_file):
+        raise Exception("training data file: {} does not exist.".format(train_file))
+
+    X, y = load_data(my_args, train_file)
+    
+    pipeline = make_svc_fit_pipeline(my_args)
+    scores = sklearn.model_selection.cross_val_score(pipeline, X, y, cv=5, scoring="f1_micro")
+    #scores = sklearn.model_selection.cross_val_score(pipeline, X, y, cv=sklearn.model_selection.LeaveOneOut(), scoring="f1_micro")
+    print("Mean: {:6.4f} STD: {:6.4f}\nAll: {}".format(scores.mean(), scores.std(), scores))
+
+    return
+
 def get_feature_names(pipeline, X):
     primary_feature_names = list(X.columns[:])
     if 'polynomial-features' in pipeline['features'].named_steps:
@@ -672,7 +686,7 @@ def show_best_params(my_args):
 def parse_args(argv):
     parser = argparse.ArgumentParser(prog=argv[0], description='Fit Data with Classification Model')
     parser.add_argument('action', default='DT',
-                        choices=[ "DT", "SVC", "score", "show-model", "cross-validate", "grid-search", "show-best-params", "random-search" ], 
+                        choices=[ "DT", "SVC", "score", "show-model", "cross-validate", "cross-validate-svc","grid-search", "show-best-params", "random-search" ], 
                         nargs='?', help="desired action")
     parser.add_argument('--train-file',    '-t', default="",    type=str,   help="name of file with training data")
     parser.add_argument('--test-file',     '-T', default="",    type=str,   help="name of file with test data (default is constructed from train file name)")
@@ -737,6 +751,8 @@ def main(argv):
         do_random_search(my_args)
     elif my_args.action == 'cross-validate':
         do_cross_validation(my_args)
+    elif my_args.action == 'cross-validate-svc':
+        do_cross_validation_SVC(my_args)
     elif my_args.action == "score":
         show_score(my_args)
     elif my_args.action == "show-model":
